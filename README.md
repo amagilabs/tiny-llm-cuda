@@ -1,146 +1,102 @@
-# tiny-llm
+<!-- Copyright 2026 AmagiLabs. SPDX-License-Identifier: Apache-2.0. Part of tiny-llm-cuda; see NOTICE. -->
+# tiny-llm-cuda
 
-[![CI (main)](https://github.com/skyzh/tiny-llm/actions/workflows/main.yml/badge.svg)](https://github.com/skyzh/tiny-llm/actions/workflows/main.yml)
+A fork of [skyzh/tiny-llm](https://github.com/skyzh/tiny-llm) that runs the course's reference solution on an
+NVIDIA GPU. The course is written for Apple silicon: MLX plus a set of custom Metal kernels. This fork adds an
+optional CUDA backend for those kernels, so weeks 1 to 3 also run on Linux with an NVIDIA card.
 
-tiny-llm is a hands-on course for systems engineers who want to understand LLM
-inference end to end. You can think of it as an LLM-serving counterpart to
-CMU's [Needle](https://github.com/dlsyscourse/hw1/tree/main/python/needle)
-project: build the path that loads a Qwen3 model, turns tokens into logits, and
-generates text.
+All credit for the course, its code and its book goes to Alex Chi Z. ([@skyzh](https://github.com/skyzh)) and
+the tiny-llm contributors. Read the book at **https://skyzh.github.io/tiny-llm/**. This repo does not copy or
+change it. The upstream README is kept as [README.upstream.md](README.upstream.md).
 
-The course begins with array and matrix operations, then introduces kernels and
-serving machinery as the running model needs them. Keeping the implementation
-small enough to read end to end makes it possible to connect the equations to
-memory traffic, kernel occupancy, KV-cache growth, batching, and request
-scheduling.
+## What changed
 
-The course is built on MLX arrays and the MLX extension runtime, without using
-high-level neural-network layers. When a chapter teaches an operator, your
-solution implements that operator in Python, C++, or Metal rather than calling
-the corresponding optimized MLX operation. MLX remains the correctness oracle
-and performance baseline.
+- `src/tiny_llm_cuda_kernels/`: CUDA versions of the 12 Metal kernels the reference solution calls (RMSNorm,
+  RoPE, SwiGLU, 4-bit quantized matmul and embedding, decode and prefill attention, the paged KV cache and
+  paged attention). They are CUDA source strings compiled at runtime through MLX's `mx.fast.cuda_kernel`, so
+  there is no C++ build step.
+- `src/extensions_ref/tiny_llm_ext_ref/__init__.py`: one opt-in switch. With `TINY_LLM_BACKEND=cuda` the
+  reference extension loads the CUDA kernels. Without it, the file behaves exactly as upstream, so Mac use is
+  unchanged.
+- `scripts/cuda/`: setup, test runner, decode benchmark and the correctness checks for the week-3 fusions.
+- Everything else, including the rest of `src/tiny_llm_ref` and the learner's starter code, is upstream code at
+  commit `fa22518`. [NOTICE](NOTICE) lists every added and modified file.
 
-## The Learning Path
+How the kernels map from Metal and what the week-3 call-site patch does: [docs/cuda/DESIGN.md](docs/cuda/DESIGN.md).
 
-The course follows a four-week learning path:
+## Setup (Linux, NVIDIA GPU)
 
-- **Week 1: From Matmul to Text.** Build a Qwen3 model directly from `mlx.core`
-  array operations: attention, RoPE, GQA, RMSNorm, the MLP, sampling, and
-  the autoregressive loop.
-- **Week 2: A Faster Single Request.** Day 1 adds `kv-cache` and
-  request-bounded `capacity-cache`; Day 2 keeps W4 projection weights packed
-  through the `quantized-matvec` checkpoint. Day 3 adds SIMD matrix prefill at
-  `simd-matmul`. Day 4 adds cumulative RMSNorm, RoPE, and SwiGLU checkpoints.
-  Day 5 adds `tiled-prefill` and runs the completed `selected` model.
-- **Week 3: Build a Mini vLLM.** Introduce continuous
-  batching and chunked admission, then make paged KV the canonical serving
-  layout. Decode attention and FlashAttention learn to read pages directly so
-  the scheduler does not rebuild dense history on every step.
-- **Week 4: Build a Coding Agent.** Start with a bounded, validated agent loop,
-  then connect it to a small workspace. The course is publishing one reviewed
-  checkpoint at a time; Days 1 through 9 now cover inspection, approved edits,
-  one validation command, simple effect receipts, and one visible
-  checkpoint-and-resume boundary, receipt-backed context compaction, and one
-  visible inspect-and-steer pause, and deterministic evaluation of observable
-  outcomes, then tokenizer/KV-prefix reuse for two isolated steered branches
-  and one explicit evidence-backed selection, followed by bounded,
-  range-retrievable evidence for oversized tool results.
-
-## Why MLX and Qwen3?
-
-Apple silicon provides a practical local environment with one shared memory
-space and direct access to Metal kernels. Students can inspect the complete
-path on one machine instead of depending on an expensive CUDA GPU setup.
-
-Qwen3-4B is large enough to expose real weight-bandwidth, attention, and cache
-costs, but small enough to iterate on locally. Its grouped-query attention,
-QK normalization, BF16 activations, and 4-bit weights also keep the exercises
-close to current model-serving work.
-
-## Start Here
-
-The book is published at
-[skyzh.github.io/tiny-llm](https://skyzh.github.io/tiny-llm/). Begin with the
-[environment setup](https://skyzh.github.io/tiny-llm/setup.html), or verify an
-existing checkout with:
+Tested on one RTX 3090 (24 GB), driver 595.99.02 (CUDA 13.2), Python 3.12.
 
 ```bash
-pdm install -v
-pdm run check-installation
-pdm run test-refsol -- -- -k week_1
+git clone https://github.com/amagilabs/tiny-llm-cuda.git
+cd tiny-llm-cuda
+bash scripts/cuda/setup.sh            # venv in .venv-cuda + Qwen3 0.6B / 1.7B / 4B MLX 4-bit weights
+. .venv-cuda/bin/activate
 ```
 
-The `tiny_llm` package is where students implement the exercises.
-`tiny_llm_ref` contains the reference solution used by the tests and benchmark
-appendix. The [book summary](book/src/SUMMARY.md) lists the chapter order;
-implementation, test, and publication readiness is tracked below.
+`setup.sh` installs `requirements-cuda.txt`: `mlx[cuda13]==0.32.4`, `mlx-lm==0.31.3`, numpy, pytest and
+huggingface_hub. If your driver only supports CUDA 12, change `mlx[cuda13]` to `mlx[cuda12]` there first.
 
-## Roadmap
+## Use it
 
-The table tracks implementation (`Code`), tests (`Test`), rendered chapters (`Doc`), and Chi's review of learner-facing material (`Audit`). Week 4 is publishing one reviewed day at a time; Days 1 through 9 are currently available to learners. The Audit column reflects Chi's personal editorial pass on the published course content and is independent of code/test/doc readiness.
+Turn the backend on with one environment variable:
 
-Day 3 can send file contents to the model, modify files after approval, and run
-one exact configured command. Use a disposable workspace without secrets and
-read the [Week 4 overview](book/src/week4-overview.md) before running the loop.
-Day 4 checkpoints a complete tool-observation boundary with the scripted
-model's fake cache metadata, then restores a fresh model without replaying the
-completed edit or command.
-Day 5 compacts older completed effects in the model-visible transcript while
-their exact receipts retain the full action, result, and changed artifacts.
-Day 6 inspects one complete-observation checkpoint, appends one visible operator
-instruction, and resumes a fresh model without replaying the completed effect.
-Day 7 evaluates one completed run from declared final, file, result, and receipt
-facts without grading hidden reasoning or exact transcript shape.
-Day 8 reuses one real tokenizer/KV checkpoint for two differently steered,
-effect-isolated continuations, evaluates both with Day 7's harness, and makes
-one explicit passing selection without pretending completed effects were
-rewound.
-Day 9 stores exact oversized tool-result bytes outside the model prompt, shows
-a bounded identity/digest/head-tail observation, and lets the model retrieve
-one explicit byte range through the existing loop.
+```bash
+export TINY_LLM_BACKEND=cuda
+export PYTHONPATH=src:.
 
-| Week + Chapter | Topic | Code | Test | Doc | Audit |
-|---|---|---|---|---|---|
-| 1.1 | Attention | ✅ | ✅ | ✅ | ✅ |
-| 1.2 | RoPE | ✅ | ✅ | ✅ | ✅ |
-| 1.3 | Grouped Query Attention | ✅ | ✅ | ✅ | ✅ |
-| 1.4 | RMSNorm and MLP | ✅ | ✅ | ✅ | ✅ |
-| 1.5 | Load the Model | ✅ | ✅ | ✅ | ✅ |
-| 1.6 | Generate Responses (aka Decoding) | ✅ | ✅ | ✅ | ✅ |
-| 1.7 | Sampling | ✅ | ✅ | ✅ | ✅ |
-| 2.1 | Cache and Measure (`kv-cache`, `capacity-cache`) | 🚧 | 🚧 | ✅ | 🚧 |
-| 2.2 | Keep W4 Packed (`quantized-matvec`) | 🚧 | 🚧 | ✅ | 🚧 |
-| 2.3 | SIMD Matrix Prefill (`simd-matmul`) | 🚧 | 🚧 | ✅ | 🚧 |
-| 2.4 | Fused Model Primitives (`rmsnorm`, `rope`, `swiglu`) | 🚧 | 🚧 | ✅ | 🚧 |
-| 2.5 | Tiled Dense Prefill Attention (`tiled-prefill`, `selected`) | 🚧 | 🚧 | ✅ | 🚧 |
-| 3.1 | Continuous Batching | ✅ | ✅ | ✅ | 🚧 |
-| 3.2 | Chunked Prefill | ✅ | ✅ | ✅ | 🚧 |
-| 3.3 | Paged KV Cache | ✅ | ✅ | ✅ | 🚧 |
-| 3.4 | Direct Paged Attention | ✅ | ✅ | ✅ | 🚧 |
-| 3.5 | Paged FlashAttention | ✅ | ✅ | ✅ | 🚧 |
-| 3.6 (optional) | MoE (Mixture of Experts) | ✅ | ✅ | ✅ | 🚧 |
-| 3.7 (optional) | Speculative Decoding | ✅ | ✅ | ✅ | 🚧 |
-| 4.1 | Validated Agent Loop | ✅ | ✅ | ✅ | 🚧 |
-| 4.2 | Inspect a Workspace | ✅ | ✅ | ✅ | 🚧 |
-| 4.3 | Edit, Validate, and Record | ✅ | ✅ | ✅ | 🚧 |
-| 4.4 | Checkpoint and Resume | ✅ | ✅ | ✅ | 🚧 |
-| 4.5 | Compact Completed Work | ✅ | ✅ | ✅ | 🚧 |
-| 4.6 | Inspect and Steer a Paused Agent | ✅ | ✅ | ✅ | 🚧 |
-| 4.7 | Evaluate Observable Outcomes | ✅ | ✅ | ✅ | 🚧 |
-| 4.8 | Fork, Steer, and Select | ✅ | ✅ | ✅ | 🚧 |
-| 4.9 | Bound Tool Evidence | ✅ | ✅ | ✅ | 🚧 |
+python main.py --model qwen3-4b --solution ref --loader week3 --prompt "What does a KV cache do?"
+bash scripts/cuda/run_tests.sh                       # weeks 1-3 + week 4 day 1 reference tests
+python scripts/cuda/bench_decode.py                  # decode tok/s vs stock mlx-lm
+```
 
-Earlier Week 2 chapter URLs not reused by active Days 1–5 remain available as
-[historical material](book/src/week2-02-benchmark-profile.md). The former Day 4
-address now serves the [active fused-primitives lesson](book/src/week2-04-fused-model-kernels.md).
-Those historical pages describe an earlier test and checkpoint order, separate
-from the current Day 1 → Day 2 → Day 3 → Day 4 → Day 5 route.
+Unset `TINY_LLM_BACKEND` (or set it to anything else) and the upstream Metal path is used again.
 
-Other topics not covered include quantized or compressed KV caches,
-cross-request prefix caching, fine-tuning, and long-context techniques.
+Other switches:
 
-## Community
+| variable | values | effect |
+|---|---|---|
+| `TINY_LLM_BACKEND` | `cuda` / unset | CUDA kernels / upstream Metal extension |
+| `TL_PATCH_WEEK3` | `1` (default), `all`, `0`, or a list like `qk,kv` | week-3 call-site patch: fewer kernel calls per decode step. `1` is bitwise identical to unpatched; `all` adds a faster MLP path that is not (about 1% on logits) |
+| `TL_FUSE_NORM_ROPE` | `1` (default) / `0` | small RMSNorm-into-RoPE fusion |
 
-Join skyzh's Discord server to study with the tiny-llm community.
+## Test results (RTX 3090, 2026-11-06)
 
-[![Join skyzh's Discord Server](book/src/discord-badge.svg)](https://skyzh.dev/join/discord)
+`bash scripts/cuda/run_tests.sh`, reference-solution tests from `tests_refsol/`:
+
+| part | tests | result |
+|---|---|---|
+| Week 1 (days 1-7) | 250 | all pass |
+| Week 2 (days 1-5 + reference runtime) | 54 | all pass |
+| Week 3 (days 1-7) | 152 | all pass |
+| Week 4 day 1 | 16 | all pass |
+| **Total** | **472** | **472 pass, 0 fail** |
+
+Weeks 1-3 cover every custom kernel. Week 4 days 2-8 and the other helper test files pass as well.
+Six tests still fail on Linux: 1 in `test_week_4_day_9.py`, 4 in `test_week_4_starter_sync.py` and 1 in
+`test_extension_interface_sync.py`. All six import the learner's own compiled extension
+(`src/extensions/tiny_llm_ext`), which is the course exercise and is not part of this port.
+`scripts/cuda/check_fusion.py` passes every check: tokens and logits are identical with the week-3 patch on and off.
+
+Decode speed, Qwen3-4B MLX 4-bit, greedy, 256 tokens after the prompt (`scripts/cuda/bench_decode.py`, one run):
+
+| path | tok/s |
+|---|---|
+| reference week 3, paged attention, CUDA kernels, `mx.eval` every step | 101.2 |
+| same, pipelined (`mx.async_eval` one step ahead, as mlx-lm does) | 126.6 |
+| reference week 2, CUDA kernels | 40.4 |
+| stock mlx-lm `stream_generate`, same GPU, same run | 151.8 |
+
+Pipelined, the course model runs at about 83% of stock mlx-lm. The remaining gap is mostly CPU-side graph
+building, not the kernels (see [DESIGN.md](docs/cuda/DESIGN.md), section 5).
+
+## Scope
+
+This is a learning port, not a serving engine. It runs on one GPU and has no tensor parallelism, no
+OpenAI-compatible server and no multi-GPU support. For production serving on NVIDIA, use vLLM or llama.cpp.
+
+## License
+
+Code: Apache License 2.0, same as upstream ([LICENSE](LICENSE), [NOTICE](NOTICE)). The book in `book/` is
+upstream's, under CC BY-NC-SA 4.0, and is unchanged.

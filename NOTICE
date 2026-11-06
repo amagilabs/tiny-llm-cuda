@@ -1,0 +1,35 @@
+tiny-llm-cuda
+Copyright 2026 AmagiLabs
+
+This product is a fork of tiny-llm (https://github.com/skyzh/tiny-llm) by Alex Chi Z. (skyzh)
+and contributors, taken at commit fa22518299a405ca6b61b3a0faba334f6081299d. tiny-llm's code is
+licensed under the Apache License, Version 2.0 (see LICENSE). The tiny-llm book (book/) is licensed
+separately under CC BY-NC-SA 4.0, as stated in its source files; this fork does not modify it and
+none of its text is copied into the new documentation.
+
+Copyright notices in upstream files, including those of Apple Inc. in the MLX extension sources,
+are kept unchanged.
+
+Changes made in this fork (Apache License 2.0, section 4(b)):
+
+Modified upstream files (each carries a "Modified by AmagiLabs" header):
+  src/extensions_ref/tiny_llm_ext_ref/__init__.py
+      Adds an opt-in switch: with TINY_LLM_BACKEND=cuda the reference extension's kernels are
+      loaded from src/tiny_llm_cuda_kernels instead of the compiled Metal library. Without the
+      variable the file behaves as upstream.
+  README.md
+      Replaced with this fork's README. The upstream README is kept verbatim as README.upstream.md.
+
+New files (each carries an AmagiLabs copyright header):
+  NOTICE
+  README.upstream.md          (upstream README.md, moved, content unchanged)
+  requirements-cuda.txt
+  docs/cuda/DESIGN.md
+  src/tiny_llm_cuda_kernels/  (__init__.py, common.py, week2.py, quantized.py, matrix.py,
+                               paged.py, attention.py, flash.py, week3_patch.py, ext_shim.py)
+      CUDA ports, written with mlx.core.fast.cuda_kernel, of the Metal kernels in
+      src/extensions_ref/src. week3_patch.py also contains code adapted from
+      src/tiny_llm_ref/qwen3_week3.py and src/tiny_llm_ref/paged_kv_cache.py, applied at import
+      time when the CUDA backend is enabled; the upstream files themselves are not edited.
+  scripts/cuda/               (setup.sh, run_tests.sh, bench_decode.py, check_fusion.py,
+                               check_mlp.py)

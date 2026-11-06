@@ -1,0 +1,8 @@
+# tiny-llm-cuda: Linux + NVIDIA GPU environment (tested on an RTX 3090, driver CUDA 13.2, Python 3.12).
+# Install into a fresh venv:  pip install -r requirements-cuda.txt
+# Use mlx[cuda12] instead of mlx[cuda13] if your driver only supports CUDA 12.
+mlx[cuda13]==0.32.4
+mlx-lm==0.31.3
+numpy>=2.2.4
+pytest>=8.3.5
+huggingface_hub
