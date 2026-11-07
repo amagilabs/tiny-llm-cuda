@@ -29,13 +29,16 @@ finish executing (they import the extension first, so they are not loaded yet at
    as one quantized_gate_up_swiglu launch (our W4A16 matvec, 2 MLX QuantizedMatmul + 1 swiglu call -> 1 call
    per layer). Not bitwise vs upstream: upstream's week 3 uses MLX's quantized_matmul, whose summation order
    ours does not reproduce (bitwise vs our own matvec + swiglu instead). "1" stays the bitwise set.
+   The validated launch plan is cached per (module, x shape, dtype) and the ND kernel variant reads decode's
+   [1, 1, N] directly, so the hot path has no shape checks and no reshapes. Kept opt-in after the 512-step
+   agreement check (scripts/cuda/check_agree.py, docs/cuda/DESIGN.md section 4): greedy decode diverges from "1" at near-ties.
 
 Every patched function falls back to the original upstream function for anything outside the decode fast
 path, and refuses to install if the upstream source no longer matches the hash it was written against.
-Switches: TL_PATCH_WEEK3=0 | 1 | comma list of qk,qk2,kv,blk,fold in the environment, or set ENABLED_QK /
-ENABLED_QK2 / ENABLED_KV / ENABLED_BLOCK / ENABLED_FOLD = False at runtime
+Switches: TL_PATCH_WEEK3=0 | 1 | all | comma list of qk,qk2,kv,blk,fold,mlp in the environment, or set ENABLED_QK /
+ENABLED_QK2 / ENABLED_KV / ENABLED_BLOCK / ENABLED_FOLD / ENABLED_MLP = False at runtime
 (installed, but every call goes to the upstream original), which is what scripts/cuda/check_fusion.py uses
-for the patched-vs-unpatched token check. See docs/cuda/DESIGN.md sections 6-8.
+for the patched-vs-unpatched token check. See docs/cuda/DESIGN.md section 4.
 """
 
 import hashlib
@@ -331,8 +334,25 @@ def _patch_model(mod):
 
 # ---------------------------------------------------------------- 5. gate/up + swiglu in one kernel (opt-in)
 
+_MLP_PLANS = {}  # (id(Qwen3MLP), x.shape, x.dtype) -> (6 gate/up arrays, kernel or None, launch kw)
+
+
+def _mlp_plan(self, x):
+    from .quantized import gate_up_swiglu_plan
+
+    wg, wu = self.w_gate, self.w_up
+    arrays = (wg.weight, wg.scales, wg.biases, wu.weight, wu.scales, wu.biases)
+    plan = None
+    if (x.ndim >= 1 and wg.bits == 4 and wu.bits == 4 and wg.group_size == 128 and wu.group_size == 128
+            and wg.biases is not None and wu.biases is not None):
+        plan = gate_up_swiglu_plan(x, *arrays)
+    if len(_MLP_PLANS) > 1024:  # prefill shapes vary per prompt; keep the cache bounded
+        _MLP_PLANS.clear()
+    return arrays + ((None, None) if plan is None else plan)
+
+
 def _patch_mlp(mod):
-    from .quantized import quantized_gate_up_swiglu
+    from . import quantized as _q
 
     cls = mod.Qwen3MLP
     name = "Qwen3MLP.__call__"
@@ -342,21 +362,24 @@ def _patch_mlp(mod):
     quantized_linear = mod.quantized_linear
 
     def __call__(self, x):
-        wg, wu = self.w_gate, self.w_up
-        if not (ENABLED_MLP and x.ndim >= 1 and wg.bits == 4 and wu.bits == 4 and wg.group_size == 128
-                and wu.group_size == 128 and wg.biases is not None and wu.biases is not None):
+        # Plan validated once per (module, x shape, x dtype) and reused while the six gate/up arrays are the
+        # same objects (bits/group_size are read at plan time). Decode then does one dict lookup, six identity
+        # checks and one launch whose output is already [..., K]: no shape checks, no reshape nodes.
+        if not ENABLED_MLP:
             COUNTS["mlp_fallback"] += 1
             return orig(self, x)
-        rows = x.size // x.shape[-1] if x.shape[-1] else 0
-        act = None
-        if 0 < rows <= 8:
-            act = quantized_gate_up_swiglu(x.reshape(rows, x.shape[-1]), wg.weight, wg.scales, wg.biases,
-                                           wu.weight, wu.scales, wu.biases)
-        if act is None:
+        key = (id(self), x.shape, x.dtype)
+        p = _MLP_PLANS.get(key)
+        wg, wu = self.w_gate, self.w_up
+        if p is None or not (p[0] is wg.weight and p[1] is wg.scales and p[2] is wg.biases
+                             and p[3] is wu.weight and p[4] is wu.scales and p[5] is wu.biases):
+            p = _MLP_PLANS[key] = _mlp_plan(self, x)
+        if p[6] is None:
             COUNTS["mlp_fallback"] += 1
             return orig(self, x)
         COUNTS["mlp_fused"] += 1
-        return quantized_linear(act.reshape(*x.shape[:-1], act.shape[-1]), self.w_down)
+        act = _q.call(p[6], [x, p[0], p[1], p[2], p[3], p[4], p[5]], p[7])[0]
+        return quantized_linear(act, self.w_down)
 
     __call__._tl_patched = True
     __call__._tl_orig = orig

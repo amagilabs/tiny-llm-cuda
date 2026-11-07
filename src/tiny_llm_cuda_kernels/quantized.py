@@ -368,3 +368,42 @@ def quantized_gate_up_swiglu(a, wg, sg, zg, wu, su, zu, stream=None):
     if plan is False:
         return None
     return call(plan[0], [a, wg, sg, zg, wu, su, zu], plan[1], stream)[0]
+
+
+# Same kernel body, but M and N come from the grid and the packed weight instead of a_shape, so the
+# activations can be any [..., N] (decode's [1, 1, N]) and the output any [..., K]: no reshape nodes.
+_GATE_UP_HEAD = """    const int M = a_shape[0];
+    const int N = a_shape[1];
+    const int K = bg_shape[0];
+"""
+assert _GATE_UP_SRC.count(_GATE_UP_HEAD) == 1
+_GATE_UP_ND_SRC = _GATE_UP_SRC.replace(_GATE_UP_HEAD, """    const int K = bg_shape[0];
+    const int N = bg_shape[1] * 8;
+    const int M = gridDim.x / ((K + 7) / 8);
+""")
+
+
+def gate_up_swiglu_plan(x, wg, sg, zg, wu, su, zu):
+    """Validated launch plan for x [..., N] with rows = prod(x.shape[:-1]) in 1..8: (kernel, launch kw), output
+    shaped x.shape[:-1] + (K,). None outside the path. Callers cache it (week3_patch keys it on the weight
+    arrays and x.shape/dtype), so the decode step does no shape checks and no reshapes.
+    Bitwise equal to quantized_gate_up_swiglu(x.reshape(rows, N), ...).reshape(..., K)."""
+    shape = tuple(x.shape)
+    if not shape or mx.default_device() != mx.gpu:
+        return None
+    N = shape[-1]
+    rows = 1
+    for d in shape[:-1]:
+        rows *= d
+    ok = (0 < rows <= 8 and x.dtype in (mx.bfloat16, mx.float16) and wg.ndim == 2
+          and wg.dtype == mx.uint32 and wu.dtype == mx.uint32 and wg.shape == wu.shape
+          and N % 128 == 0 and wg.shape[1] == N // 8 and wg.shape[0] > 0
+          and sg.shape == zg.shape == su.shape == zu.shape == (wg.shape[0], N // 128)
+          and all(t.dtype == x.dtype for t in (sg, zg, su, zu)))
+    if not ok:
+        return None
+    K = wg.shape[0]
+    k = kernel("tl_qmv_gate_up_swiglu_w4a16_g128_nd", ["a", "bg", "sg", "zg", "bu", "su", "zu"], ["out"],
+               _GATE_UP_ND_SRC)
+    return k, launch_kw((rows * ((K + 7) // 8),), (64,), [shape[:-1] + (K,)], [x.dtype],
+                        template=[("T", x.dtype)])

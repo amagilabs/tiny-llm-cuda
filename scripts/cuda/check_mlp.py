@@ -47,6 +47,12 @@ for (M, N, K) in ((1, 2560, 9728), (2, 2560, 9728), (8, 2560, 9728), (1, 256, 40
     own = week2.swiglu(quantized.quantized_matvec(g[1], g[2], a, g[0]), quantized.quantized_matvec(u[1], u[2], a, u[0]))
     check(f"kernel M={M} N={N} K={K} == own matvec x2 + swiglu", out is not None and bool(mx.array_equal(out, own).item()),
           "(bitwise)")
+    for shp in ((1, M, N), (M, 1, N)):  # the ND plan (no reshapes) == the 2-D kernel, bitwise
+        a3 = a.reshape(shp)
+        pl = quantized.gate_up_swiglu_plan(a3, g[0], g[1], g[2], u[0], u[1], u[2])
+        o3 = None if pl is None else quantized.call(pl[0], [a3, g[0], g[1], g[2], u[0], u[1], u[2]], pl[1])[0]
+        check(f"nd plan x{shp} K={K} == 2-D kernel", o3 is not None and o3.shape == shp[:-1] + (K,)
+              and bool(mx.array_equal(o3.reshape(M, K), out).item()), "(bitwise, no reshape nodes)")
     ref = mlx_ref(a, g, u)
     d = mx.abs(out.astype(mx.float32) - ref.astype(mx.float32))
     rel = (d.max() / mx.maximum(mx.abs(ref.astype(mx.float32)).max(), 1e-6)).item()
@@ -82,6 +88,28 @@ for _m in (week2, _kp, _ka, _kf, _km, quantized, _kc):
 NAME = "Qwen/Qwen3-4B-MLX-4bit"
 m, tok = load(NAME)
 ids = mx.array(tok.encode("Write a short story about a robot learning to cook."), dtype=mx.int32)
+
+
+def mlp_prev(mlp, x):
+    """The mlp wrapper as of commit 8262675 (reshape to [rows, N], 2-D kernel, reshape back), for the bitwise
+    check of the cached-plan wrapper."""
+    wg, wu = mlp.w_gate, mlp.w_up
+    rows = x.size // x.shape[-1]
+    act = quantized.quantized_gate_up_swiglu(x.reshape(rows, x.shape[-1]), wg.weight, wg.scales, wg.biases,
+                                             wu.weight, wu.scales, wu.biases)
+    return qwen3_week3.quantized_linear(act.reshape(*x.shape[:-1], act.shape[-1]), mlp.w_down)
+
+
+PLAN_BUILDS = [0]
+_plan_orig = week3_patch._mlp_plan
+
+
+def _plan_counted(self, x):
+    PLAN_BUILDS[0] += 1
+    return _plan_orig(self, x)
+
+
+week3_patch._mlp_plan = _plan_counted
 
 
 def decode(model, n, mlp):
@@ -130,10 +158,22 @@ def step_graph(model, mlp):
 for label, kw in (("paged", dict(week=3, enable_paged_attention=True)),
                   ("dense", dict(week=3, enable_paged_attention=False))):
     model = models.dispatch_model(NAME, m, **kw)
+    if label == "paged":
+        mx.random.seed(7)
+        bad = 0
+        for li, layer in enumerate(model.layers_inner):
+            for shp in ((1, 1, 2560), (1, 2, 2560), (8, 1, 2560)):
+                xx = (0.5 * mx.random.normal(shp)).astype(mx.bfloat16)
+                bad += not bool(mx.array_equal(layer.mlp(xx), mlp_prev(layer.mlp, xx)).item())
+        check("cached-plan mlp == previous wrapper (8262675), every layer", bad == 0,
+              f"(bitwise; {len(model.layers_inner)} layers x 3 decode shapes, mismatches {bad})")
+    PLAN_BUILDS[0] = 0
     t0, l0, c0 = decode(model, 64, False)
     f0 = week3_patch.COUNTS["mlp_fused"]
     t1, l1, c1 = decode(model, 64, True)
     nf = week3_patch.COUNTS["mlp_fused"] - f0
+    check(f"model {label} plan built once per layer and shape", PLAN_BUILDS[0] <= 2 * 36,
+          f"(plan builds over 2 x 64 steps + prefills: {PLAN_BUILDS[0]})")
     check(f"model {label} mlp fires every layer", nf >= 36 * 64, f"(fused MLPs {nf} over 64 steps + prefill)")
     check(f"model {label} calls/step", c1 == c0, f"({c0:.1f} -> {c1:.1f}: swiglu call replaced by the fused call)")
     diffs = []

@@ -72,6 +72,11 @@ Safety rules:
 - The default set is bitwise: logits and greedy tokens are identical with the patch on and off
   (`scripts/cuda/check_fusion.py`). `mlp` is not bitwise against MLX's `quantized_matmul`, because the
   summation order differs (about 1% relative on logits), so it is opt-in only (`scripts/cuda/check_mlp.py`).
+- `mlp` caches its validated launch plan per (module, input shape, dtype) and uses an ND kernel variant,
+  so decode does no reshapes. A 512-step greedy agreement check against the default set
+  (`scripts/cuda/check_agree.py`) shows divergence at near-tied tokens on 2 of 4 prompts (teacher-forced
+  next-token match 505-512 of 512, decode-path perplexity within 0.2), so `mlp` stays opt-in.
+  On an RTX 3090 (Qwen3-4B, 4-bit, sync loop) `all` decodes about 6% faster than `1`, and about 11% faster pipelined.
 
 Switch: `TL_PATCH_WEEK3=1` (default, the bitwise set), `all` (adds `mlp`), `0` (off), or a comma list such as
 `qk,kv`. `TL_FUSE_NORM_ROPE=0` turns off a smaller norm-into-RoPE fusion in `week2.py`.
