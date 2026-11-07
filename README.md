@@ -61,9 +61,10 @@ Other switches:
 | `TL_PATCH_WEEK3` | `1` (default), `all`, `0`, or a list like `qk,kv` | week-3 call-site patch: fewer kernel calls per decode step. `1` is bitwise identical to unpatched; `all` adds a faster MLP path that is not (about 1% on logits) |
 | `TL_FUSE_NORM_ROPE` | `1` (default) / `0` | small RMSNorm-into-RoPE fusion |
 
-## Test results (RTX 3090, 2026-11-06)
+## Test results (RTX 3090, 2026-11-07)
 
-`bash scripts/cuda/run_tests.sh`, reference-solution tests from `tests_refsol/`:
+`bash scripts/cuda/run_tests.sh`, reference-solution tests from `tests_refsol/`. The results are the same with
+`TL_PATCH_WEEK3=1` and with `TL_PATCH_WEEK3=all`:
 
 | part | tests | result |
 |---|---|---|
@@ -77,19 +78,31 @@ Weeks 1-3 cover every custom kernel. Week 4 days 2-8 and the other helper test f
 Six tests still fail on Linux: 1 in `test_week_4_day_9.py`, 4 in `test_week_4_starter_sync.py` and 1 in
 `test_extension_interface_sync.py`. All six import the learner's own compiled extension
 (`src/extensions/tiny_llm_ext`), which is the course exercise and is not part of this port.
-`scripts/cuda/check_fusion.py` passes every check: tokens and logits are identical with the week-3 patch on and off.
 
-Decode speed, Qwen3-4B MLX 4-bit, greedy, 256 tokens after the prompt (`scripts/cuda/bench_decode.py`, one run):
+Correctness checks for the week-3 patch:
 
-| path | tok/s |
-|---|---|
-| reference week 3, paged attention, CUDA kernels, `mx.eval` every step | 101.2 |
-| same, pipelined (`mx.async_eval` one step ahead, as mlx-lm does) | 126.6 |
-| reference week 2, CUDA kernels | 40.4 |
-| stock mlx-lm `stream_generate`, same GPU, same run | 151.8 |
+- `scripts/cuda/check_fusion.py` passes every check: with `TL_PATCH_WEEK3=1`, tokens and logits are identical
+  to the unpatched model.
+- `scripts/cuda/check_mlp.py` passes: the fused gate/up SwiGLU kernel used by `all` is bitwise equal to our
+  two unfused matvecs plus SwiGLU, and within bf16 rounding of MLX's `quantized_matmul`.
+- `scripts/cuda/check_agree.py` compares `1` and `all` over a 223-step passage. Perplexity is 16.53 vs 16.32
+  with the paged cache and 16.37 vs 16.23 with the dense one, within 1.3%. Greedy outputs drift apart on
+  near-tied tokens, which is why `all` stays opt-in.
 
-Pipelined, the course model runs at about 83% of stock mlx-lm. The remaining gap is mostly CPU-side graph
-building, not the kernels (see [DESIGN.md](docs/cuda/DESIGN.md), section 5).
+Decode speed in tok/s, Qwen3-4B MLX 4-bit, greedy, 256 tokens after the prompt (`scripts/cuda/bench_decode.py`,
+one run per setting):
+
+| path | `TL_PATCH_WEEK3=1` | `TL_PATCH_WEEK3=all` |
+|---|---|---|
+| reference week 3, paged attention, CUDA kernels, `mx.eval` every step | 100.7 | 107.5 |
+| same, pipelined (`mx.async_eval` one step ahead, as mlx-lm does) | 125.9 | 142.9 |
+| reference week 2, CUDA kernels | 41.0 | 41.7 |
+| stock mlx-lm model in the same `mx.eval` loop | 126.8 | 127.2 |
+| stock mlx-lm `stream_generate`, same GPU, same run | 154.3 | 153.5 |
+
+Pipelined, the course model runs at about 82% of stock mlx-lm `stream_generate` with
+the default patch and about 93% with `all`. The remaining gap is mostly CPU-side graph building, not the
+kernels (see [DESIGN.md](docs/cuda/DESIGN.md), section 5).
 
 ## Scope
 
